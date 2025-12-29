@@ -6,7 +6,7 @@
  * with QCoDeS-compatible serial command interface.
  * 
  * Author: QTHz Lab @ GSU
- * Version: 1.0.0
+ * Version: 1.1.0
  * Date: 2025
  * 
  * Hardware: Arduino Mega 2560 + DHT11 sensor
@@ -52,7 +52,7 @@
 
 #define FIRMWARE_VERSION    "1.0.0"
 #define FIRMWARE_NAME       "DHT11-SCPI"
-#define MANUFACTURER        "QTHz-Lab"
+#define MANUFACTURER        "GSU-Physics"
 #define SERIAL_NUMBER       "001"
 
 #define DHT_SENSOR_PIN      2
@@ -163,29 +163,65 @@ void cmdDataStreamQ();
 // ============================================================================
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(SERIAL_BAUD_RATE);
     
+    // Wait for serial connection (important for USB serial)
     while (!Serial) {
-        ; 
+        ; // Wait for serial port to connect (needed for native USB)
     }
     
-    // Wait for USB serial to stabilize (prevents garbage)
-    delay(500);
+    // =========================================================================
+    // CRITICAL: Clear USB/Serial garbage bytes
+    // =========================================================================
+    // USB-serial chips (CH340, FTDI, etc.) can inject garbage bytes (0xF0, etc.)
+    // into the buffer during connection. We must clear these before operation.
     
-    // Clear input buffer
+    // Initial delay for USB to stabilize
+    delay(100);
+    
+    // First flush - clear any immediate garbage
     while (Serial.available() > 0) {
         Serial.read();
     }
     
+    // Wait for any late-arriving garbage
+    delay(200);
+    
+    // Second flush
+    while (Serial.available() > 0) {
+        Serial.read();
+    }
+    
+    // Aggressive flush - keep clearing for 500ms
+    unsigned long flushStart = millis();
+    while (millis() - flushStart < 500) {
+        if (Serial.available() > 0) {
+            Serial.read();
+            flushStart = millis();  // Reset timer if data received
+        }
+    }
+    
+    // Final flush
+    while (Serial.available() > 0) {
+        Serial.read();
+    }
+    
+    // =========================================================================
+    // Initialize instrument state
+    // =========================================================================
     initializeState();
     
-    // DHT11 warm-up
+    // Initial sensor warm-up read (discard first reading)
     delay(2000);
-    
     float dummy_t, dummy_h;
     dht_sensor.measure(&dummy_t, &dummy_h);
     
-    // Signal ready to Python
+    // One more buffer clear after warm-up
+    while (Serial.available() > 0) {
+        Serial.read();
+    }
+    
+    // Signal ready to host
     Serial.println("READY");
 }
 
@@ -237,6 +273,20 @@ void processSerialInput() {
     while (Serial.available() > 0) {
         char c = Serial.read();
         
+        // =====================================================================
+        // GARBAGE BYTE FILTER
+        // =====================================================================
+        // USB-serial chips can inject garbage bytes (0xF0, 0xFF, etc.)
+        // Filter out any non-printable, non-control characters
+        if ((unsigned char)c >= 0x80) {
+            // Discard high-bit bytes (garbage from USB)
+            continue;
+        }
+        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+            // Discard control characters except newline, carriage return, tab
+            continue;
+        }
+        
         // Command terminator (newline or carriage return)
         if (c == '\n' || c == '\r') {
             if (cmdIndex > 0) {
@@ -287,6 +337,15 @@ void parseAndExecuteCommand(char* cmd) {
     }
     else if (strcmp(cmd, "*OPC?") == 0) {
         cmdOPC();
+    }
+    else if (strcmp(cmd, "*CLR") == 0) {
+        // Clear all buffers and reset command parser
+        cmdIndex = 0;
+        cmdBuffer[0] = '\0';
+        while (Serial.available() > 0) {
+            Serial.read();
+        }
+        Serial.println("OK");
     }
     // ---- System Commands ----
     else if (strcmp(cmd, "SYST:ERR?") == 0) {
